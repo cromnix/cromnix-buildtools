@@ -1,0 +1,261 @@
+#!/bin/bash
+
+# Copyright (c) 2016-2017 Chris Cromer
+#
+# This file is part of cromnix-buildtools. It is subject to the license terms in the LICENSE file found in the top-level directory of this distribution and at
+# https://mysite.com/LICENSE
+# This file may not be copied, modified, propagated, or distributed except according to the terms contained in the LICENSE file.
+
+die() {
+	echo ${@} 1>&2;
+	exit 1;
+}
+
+usage() {
+	printf "chromnix-chroot\n\n"
+
+	printf "Chroot management functions for use in cromnix\n\n"
+
+	printf "Usage: /usr/bin/cromnix-chroot [options]\n\n"
+
+	printf "Options:\n"
+	printf "  -h, --help                Display this help message\n"
+	printf "  -m, --make                Create a chroot environment\n"
+	printf "  -x, --upgrade             Upgrade the packages in the chroot environment\n"
+	printf "  -r, --remove              Remove the chroot environment\n"
+	printf "  -u, --user <user>         User name to use when inside the chroot\n"
+	printf "  -g, --group <group>       User group to use when inside the chroot\n"
+	printf "  -p, --packages <packages> Packages to install into the chroot during make or\n"
+	printf "                            upgrade\n"
+
+	exit 0;
+}
+
+root=/var/lib/cromnix-chroot
+packages=('cromnix-base' 'cromnix-dev' 'sudo')
+
+chroot_action=0
+TEMP=$(getopt -o "hmrxu:g:p:" -l "help,make,remove,update,user:,group:,packages:" -n "cromnix-chroot" -- "$@")
+if [ $? -ne 0 ]; then
+	usage
+fi
+
+eval set -- "${TEMP}"
+unset TEMP
+
+while true; do
+	case "${1}" in
+		-h|--help)
+			usage
+			shift;
+			;;
+		-u|--user)
+			user="${2}"
+			shift 2;
+			;;
+		-g|--group)
+			group="${2}"
+			shift 2;
+			;;
+		-p|--packages)
+			IFS=', ' read -r -a userpackages <<< "${2}"
+			# combine the packages
+			packages=("${packages[@]}" "${userpackages[@]}")
+			# remove duplicates
+			packages=($(echo "${packages[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
+			shift 2;
+			;;
+		-m|--make)
+			if [ ${chroot_action} -ne 0 ]; then
+				die "You can only do one action at a time"
+			fi
+			chroot_action=1
+			shift;
+			;;
+		-r|--remove)
+			if [ ${chroot_action} -ne 0 ]; then
+				die "You can only do one action at a time"
+			fi
+			chroot_action=2
+			shift;
+			;;
+		-x|--update)
+			if [ ${chroot_action} -ne 0 ]; then
+				die "You can only do one action at a time"
+			fi
+			packages=()
+			chroot_action=3
+			shift;
+			;;
+		--) shift; break;;
+		*) break;;
+	esac
+done
+
+if [ "${EUID}" -ne "0" ]; then
+	die "This program needs elevated priveleges to work"
+fi
+
+makechroot() {
+	if [ -d "${root}" ]; then
+		rm -rf --one-file-system "${root}"
+	fi
+
+	mkdir -m 0755 -p ${root}/root/var/{cache/pacman/pkg,lib/pacman,log} ${root}/root/{dev,etc}
+	mkdir -m 1777 -p ${root}/root/{tmp,run}
+	mkdir -m 0555 -p ${root}/root/{sys,proc}
+
+	if ! pacman -r ${root}/root --noconfirm -Sy "${packages[@]}"; then
+		die "Packages not installed in chroot"
+	fi
+
+	echo 'LANG=en_US.UTF-8' > ${root}/root/etc/locale.conf
+
+	chroot_uid=${SUDO_UID:-$UID}
+	chroot_gid=$(id -g "$chroot_uid")
+	sed -e '/^cromnix:/d' -i ${root}/root/etc/{passwd,group}
+	printf >>"${root}/root/etc/group" 'cromnix:x:%d:\n' ${chroot_gid}
+	printf >>"${root}/root/etc/passwd" 'cromnix:x:%d:%d:cromnix:/build:/bin/bash\n' ${chroot_uid} ${chroot_gid}
+
+	cat > ${root}/root/etc/sudoers.d/cromnixchroot <<EOF
+	Defaults env_keep += "HOME"
+	cromnix ALL = NOPASSWD: /usr/bin/pacman
+EOF
+	chmod 440 ${root}/root/etc/sudoers.d/cromnixchroot
+
+	cp /etc/pacman.conf ${root}/root/etc/pacman.conf
+
+	# temp until a server is made
+	mkdir -p ${root}/root/var/lib/cromnix-repo
+	rsync -a --delete -q -W -x /var/lib/cromnix-repo/ ${root}/root/var/lib/cromnix-repo
+}
+
+mountchroot() {
+	#mount_id=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1)
+
+	#if [ -d "/tmp/cromnix-chroot/${mount_id}" ]; then
+	#	die "${mount_id} already exists"
+	#fi
+
+	#mount_point="/tmp/cromnix-chroot/${mount_id}"
+	#mkdir -p "${mount_point}"
+
+	mount_point=$(mktemp -d /tmp/cromnix-chroot.XXXXXXXXXX)
+
+	if ! grep -qs "${mount_point}" /proc/mounts; then
+		mount --bind ${1} "${mount_point}"
+	else
+		die "${mount_point} is already mounted"
+	fi
+
+	if ! grep -qs "${mount_point}/proc" /proc/mounts; then
+		mount -t proc proc "${mount_point}/proc"
+	else
+		die "${mount_point}/proc is already mounted"
+	fi
+
+	if ! grep -qs "${mount_point}/sys" /proc/mounts; then
+		mount --rbind /sys "${mount_point}/sys"
+		mount --make-rslave "${mount_point}/sys"
+	else
+		die "${mount_point}/sys is already mounted"
+	fi
+
+	if ! grep -qs "${mount_point}/dev" /proc/mounts; then
+		mount --rbind /dev "${mount_point}/dev"
+		mount --make-rslave "${mount_point}/dev"
+	else
+		die "${mount_point}/dev is already mounted"
+	fi
+
+	cp /etc/resolv.conf "${mount_point}/etc/resolv.conf"
+
+	if [ -z "${command}" ]; then
+		if [ -z "${user}" ]; then
+			chroot "${mount_point}" /usr/bin/env -i \
+				HOME=/root \
+				TERM="${TERM}" \
+				PS1='(chroot) \u:\w\$ ' \
+				PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin \
+				bash --login
+		else
+			if [ -z "${group}" ]; then
+				group=$user
+			fi
+			chroot --userspec="${user}:${group}" "${mount_point}" /usr/bin/env -i \
+				HOME="/home/${user}" \
+				TERM="${TERM}" \
+				PS1='(chroot) \u:\w\$ ' \
+				PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin \
+				bash --login
+		fi
+	else
+		if [ -z "${user}" ]; then
+			chroot "${mount_point}" /usr/bin/env -i \
+				HOME=/root \
+				TERM="${TERM}" \
+				PS1='(chroot) \u:\w\$ ' \
+				PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin \
+				${command}
+		else
+			if [ -z "${group}" ]; then
+				group=$user
+			fi
+			chroot --userspec="${user}:${group}" "${mount_point}" /usr/bin/env -i \
+				HOME="/home/${user}" \
+				TERM="${TERM}" \
+				PS1='(chroot) \u:\w\$ ' \
+				PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin \
+				${command}
+		fi
+	fi
+
+	umount -R "${mount_point}"/{proc,sys,dev}
+	umount "${mount_point}"
+	rm -rf --one-file-system "${mount_point}"
+}
+
+if [ ${chroot_action} -eq 0 ]; then
+	if [ -z "${1}" ]; then
+		echo "Invalid usage"
+		usage
+	fi
+
+	if [ ! -d "${1}" ]; then
+		die "${1} does not exist"
+	fi
+
+	if [ ! -z "${2}" ]; then
+		command="${2}"
+	fi
+	mountchroot "${1}"
+elif [ ${chroot_action} -eq 1 ]; then
+	if [ -d "${root}" ]; then
+		while true; do
+			read -p "Overwrite the existing chroot? [y/n] " answer
+			case "${answer}" in
+				[Yy]*) makechroot; break;;
+				[Nn]*) exit 0;;
+				*) echo "Please answer yes or no";;
+			esac
+		done
+	else
+		makechroot
+	fi
+elif [ ${chroot_action} -eq 2 ]; then
+	if [ -d "${root}" ]; then
+		rm -rf --one-file-system ${root}
+		echo "Chroot environment deleted"
+	else
+		die "No chroot environment to delete"
+	fi
+elif [ ${chroot_action} -eq 3 ]; then
+	if [ ! -d ${root} ]; then
+		die "No chroot environment to upgrade"
+	fi
+	# copy the local repo into the chroot to help out with development, remove once a true server is online
+	rsync -a --delete -q -W -x /var/lib/cromnix-repo/ ${root}/root/var/lib/cromnix-repo
+
+	command="pacman --noconfirm -Syu $(IFS=$'\n'; echo "${packages[*]}")"
+	mountchroot ${root}/root
+fi

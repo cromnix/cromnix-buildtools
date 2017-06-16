@@ -1,0 +1,10 @@
+These tools are designed to help build cromnix packages.
+
+cromnix-repo:
+	This tool will help in making and cleaning a local pacman repo.
+
+cromnix-chroot:
+	This tool will help manage local chroot enviroments for packing or allow chrooting into another installation.
+
+makepkgchroot:
+	This tool must be run as root, it will create a package in a fresh chroot.

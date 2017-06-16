@@ -1,0 +1,287 @@
+#!/bin/bash
+
+REPOS=('main' 'cromnix' 'vanilla' 'multilib' 'openrc' 'lfs' 's6' 'runit')
+PACCACHE=1
+
+shopt -s extglob
+
+die() {
+	echo ${@} 1>&2;
+	exit 1;
+}
+
+usage() {
+	printf "cromnix-repo\n\n"
+
+	printf "Manage the local cromnix repo.\n\n"
+
+	printf "Usage: /usr/bin/cromnix-repo [options]\n\n"
+
+	printf "Options:\n"
+	printf "  -h, --help     Display this help message.\n"
+	printf "  -a, --add      Add packages to the repo from the out/pkg directory or from\n"
+	printf "                 the PKGDEST directory from makepkg.conf.\n"
+	printf "  -r, --rebuild  Rebuild the local repos.\n"
+	printf "  -p, --paccache Remove old packages from the repo. Has an optional argument\n"
+	printf "                 which leaves 'n' packages in the repo. Default is 1.\n"
+	printf "  -s, --srccache Remove old sources from the repo. Has an optional argument\n"
+	printf "                 which leaves 'n' sources in the repo. Default is 1.\n"
+
+	exit 0;
+}
+
+addpackages() {
+	repo_main=()
+	repo_cromnix=()
+	repo_vanilla=()
+	repo_multilib=()
+	repo_openrc=()
+	repo_lfs=()
+	repo_s6=()
+	repo_runit=()
+
+	PKGDEST="${PWD}"
+	# let's see where the package that was compile is stored
+	. /etc/makepkg.conf
+
+	# add the files to the repo and move them
+	if [ -d ./out/srcpkg ]; then
+		pushd ./out/srcpkg
+		cp -v {*.src.tar.gz,*.src.tar.xz} /var/lib/cromnix-sources 2>/dev/null
+		popd
+	fi
+	if [ -d ./out/pkg ]; then
+		cd ./out/pkg
+	else
+		cd "${PKGDEST}"
+	fi
+
+	# get a list of the packages and sort them into repos
+	for file in $(find ./ -maxdepth 1 -type f -not -name '*.sig' | sort -V  | grep 'pkg.tar.gz\|pkg.tar.xz'); do
+		file="$(basename "$(test -L "${file}" && readlink "${file}" || echo "${file}")")"
+		case "${file}" in
+			*-openrc*.pkg.tar.@(gz|xz)) repo_openrc+=("${file}");;
+			*-lfs*.pkg.tar.@(gz|xz)) repo_lfs+=("${file}");;
+			runit*.pkg.tar.@(gz|xz)) repo_runit+=("${file}");;
+			*-runit*.pkg.tar.@(gz|xz)) repo_runit+=("${file}");;
+			lfs-bootscripts*.pkg.tar.@(gz|xz)) repo_lfs+=("${file}");;
+			blfs-bootscripts*.pkg.tar.@(gz|xz)) repo_lfs+=("${file}");;
+			s6*.pkg.tar.@(gz|xz)) repo_s6+=("${file}");;
+			execline*.pkg.tar.@(gz|xz)) repo_s6+=("${file}");;
+			skalibs*.pkg.tar.@(gz|xz)) repo_s6+=("${file}");;
+			*-cromnix*.pkg.tar.@(gz|xz)) repo_cromnix+=("${file}");;
+			*-vanilla*.pkg.tar.@(gz|xz)) repo_vanilla+=("${file}");;
+			*-multilib*.pkg.tar.@(gz|xz)) repo_multilib+=("${file}");;
+			*lib32-*.pkg.tar.@(gz|xz)) repo_multilib+=("${file}");;
+			* ) repo_main+=("${file}") ;;
+		esac
+	done
+
+	if [ ${#repo_main[@]} -gt 0 ]; then
+		addpackages_repo main ${repo_main[@]}
+	fi
+	if [ ${#repo_cromnix[@]} -gt 0 ]; then
+		addpackages_repo cromnix ${repo_cromnix[@]}
+	fi
+	if [ ${#repo_vanilla[@]} -gt 0 ]; then
+		addpackages_repo vanilla ${repo_vanilla[@]}
+	fi
+	if [ ${#repo_multilib[@]} -gt 0 ]; then
+		addpackages_repo multilib ${repo_multilib[@]}
+	fi
+	if [ ${#repo_openrc[@]} -gt 0 ]; then
+		addpackages_repo openrc ${repo_openrc[@]}
+	fi
+	if [ ${#repo_lfs[@]} -gt 0 ]; then
+		addpackages_repo lfs ${repo_lfs[@]}
+	fi
+	if [ ${#repo_s6[@]} -gt 0 ]; then
+		addpackages_repo s6 ${repo_s6[@]}
+	fi
+	if [ ${#repo_runit[@]} -gt 0 ]; then
+		addpackages_repo runit ${repo_runit[@]}
+	fi
+}
+
+addpackages_repo() {
+	for file in "${@:2}"; do
+		cp "${file}" "/var/lib/cromnix-repo/${1}/x86_64/${file}"
+	done
+	pushd "/var/lib/cromnix-repo/${1}/x86_64"
+	repo-add -d "${1}.db.tar.gz" "${@:2}"
+	popd
+	#cp "${file}" "/var/lib/cromnix-repo/${repo}/x86_64/${file}"
+	#pushd "/var/lib/cromnix-repo/${repo}/x86_64"
+	#repo-add -d "${repo}.db.tar.gz" "${file}"
+	#popd
+}
+
+rebuildrepo() {
+	for REPO in "${REPOS[@]}"; do
+		echo "Rebuilding ${REPO}..."
+		cd "/var/lib/cromnix-repo/${REPO}/x86_64"
+
+		# backup the old database
+		if [ -e "${REPO}.db.tar.gz" ]; then
+			mv "${REPO}.db.tar.gz" "${REPO}.db.tar.gz.bkp"
+		fi
+		if [ -h "${REPO}.db" ]; then
+			rm "${REPO}.db"
+		fi
+		if [ -e "${REPO}.files.tar.gz" ]; then
+			mv "${REPO}.files.tar.gz" "${REPO}.files.tar.gz.bkp"
+		fi
+		if [ -h "${REPO}.files" ]; then
+			rm "${REPO}.files"
+		fi
+
+		# delete deltas for later regeneration
+		for file in $(find ./ -maxdepth 1 -type f -name '*.delta'); do
+			rm "${file}"
+		done
+
+		# get a list of all hte packages
+		packages=()
+		for file in $(find ./ -maxdepth 1 -type f -not -name '*.sig' | sort -V | grep '.pkg.tar.gz\|.pkg.tar.xz'); do
+			packages+=("${file}")
+		done
+
+		repo-add -d "${REPO}.db.tar.gz" "${packages[@]}"
+
+		# rotate in the old database files
+		if [ -e "${REPO}.db.tar.gz.bkp" ]; then
+			mv "${REPO}.db.tar.gz.bkp" "${REPO}.db.tar.gz.old"
+		fi
+		if [ -e "${REPO}.files.tar.gz.bkp" ]; then
+			mv "${REPO}.files.tar.gz.bkp" "${REPO}.files.tar.gz.old"
+		fi
+	done
+}
+
+cleanrepo() {
+	if ! [[ ${PACCACHE} =~ ^[0-9]+$ ]] || [ ${PACCACHE} -le 0 ]; then
+		die "The option for --paccache must be numeric and greater than 0."
+	fi
+	for REPO in "${REPOS[@]}"; do
+		echo "Cleaning ${REPO}..."
+		if [ $(ls -1 "/var/lib/cromnix-repo/${REPO}/x86_64" | wc -l) -gt 0 ]; then
+			paccache -rv -k${PACCACHE} -c "/var/lib/cromnix-repo/${REPO}/x86_64"
+		fi
+	done
+}
+
+cleansource() {
+	if ! [[ ${PACCACHE} =~ ^[0-9]+$ ]] || [ ${PACCACHE} -le 0 ]; then
+		die "The option for --srccache must be numeric and greater than 0."
+	fi
+	if [ -d /var/lib/cromnix-sources ]; then
+		cd /var/lib/cromnix-sources
+		package=''
+		files=()
+		for file in $(find ./ -maxdepth 1 -type f -not -name '*.sig' | sort -Vr | grep '.src.tar.gz\|.src.tar.xz'); do
+			file="$(basename "$(test -L "${file}" && readlink "${file}" || echo "${file}")")"
+			pkgname="${file%-*}"
+			pkgver="${pkgname##*-}"
+			pkgname="${pkgname%-*}"
+			pkgrel=$(echo "${file##*-}" | sed 's|.src.tar.xz||; s|.src.tar.gz||')
+			if [ "${package}" == "${pkgname}" ]; then
+				if [ ${PACCACHE} -le ${n} ]; then
+					files+=("${file}")
+				fi
+				n=$(($n + 1))
+			else
+				n=1
+				package="${pkgname}"
+			fi
+		done
+		if [ ${#files[@]} -eq 0 ]; then
+			echo "There are no sources to remove"
+		else
+			#echo "${files[@]}" | tr " " "\n"
+			rm -vf "${files[@]}"
+		fi
+	else
+		echo "There are no sources to remove"
+	fi
+}
+
+if [ "${EUID}" -ne 0 ]; then
+	if type -P sudo >/dev/null; then
+		exec sudo -- "${0}" "${@}"
+	else
+		if [ -z "${1}" ]; then
+			exec su root -c "$(printf ' %q' "${0}")"
+		else
+			exec su root -c "$(printf ' %q %q' "${0}" "${@}")"
+		fi
+	fi
+fi
+
+TEMP=$(getopt -o 'hardp::s::' -l 'help,add,rebuild,delta,paccache::,srccache::' -n 'cromnix-repo' -- "$@")
+if [ $? -ne 0 ]; then
+	usage
+fi
+
+eval set -- "${TEMP}"
+unset TEMP
+
+while true; do
+	case "${1}" in
+		'-h'|'--help')
+			usage
+			shift
+			continue
+		;;
+		'-a'|'--add')
+			addpackages
+			exit 0
+			shift
+			continue
+		;;
+		'-r'|'--rebuild')
+			rebuildrepo
+			exit 0
+			shift
+			continue
+		;;
+		'-p'|'--paccache')
+			case "${2}" in
+				'')
+					cleanrepo
+					exit 0
+				;;
+				*)
+					PACCACHE=${2}
+					cleanrepo
+					exit 0
+				;;
+			esac
+			shift 2
+			continue
+		;;
+		'-s'|'--srccache')
+			case "${2}" in
+				'')
+					cleansource
+					exit 0
+				;;
+				*)
+					PACCACHE=${2}
+					cleansource
+					exit 0
+				;;
+			esac
+			shift 2
+			continue
+		;;
+		'--')
+			shift
+			break
+		;;
+		*)
+			die 'Internal error!'
+		;;
+	esac
+done
+
+usage

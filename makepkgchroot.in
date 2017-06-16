@@ -1,0 +1,86 @@
+#!/bin/bash
+
+# This script allows packages to be built in a clean chroot environment
+
+die() {
+	echo ${@} 1>&2;
+	exit 1;
+}
+
+# main chroot location
+root=/var/lib/cromnix-chroot/root
+# fresh copy of the chroot with everything needed to build
+copy=/var/lib/cromnix-chroot/copy
+
+pacman_arguments='-CLcfs --noconfirm --nocheck'
+
+if [ ! -d /var/lib/cromnix-chroot ]; then
+	die "chroot environment is missing"
+fi
+
+out_usr=${SUDO_USER:-${USER}}
+
+# if not running as root or with sudo ask for password
+if [ "${EUID}" -ne "0" ]; then
+	if type -P sudo >/dev/null; then
+		exec sudo -- "${0}" "${@}"
+	else
+		if [ -z "${1}" ]; then
+			exec su root -c "$(printf ' %q' "${0}")"
+		else
+			exec su root -c "$(printf ' %q %q' "${0}" "${@}")"
+		fi
+	fi
+fi
+
+if [ ! -f ./PKGBUILD ]; then
+	die "PKGBUILD not found"
+fi
+
+# make a copy of the chroot
+mkdir -p ${copy}
+rsync -a --delete -q -W -x ${root}/ ${copy}
+
+install -m777 -d ${copy}/build/out/{pkg,src,srcpkg,log}
+if [ -d "${PWD}"/out ]; then
+	rsync -a --delete -q -W -x "${PWD}"/out/src/ ${copy}/build/out/src
+fi
+
+sed -e 's|#PKGDEST=/home/packages|PKGDEST=/build/out/pkg|' \
+	-e 's|#SRCDEST=/home/sources|SRCDEST=/build/out/src|' \
+	-e 's|#SRCPKGDEST=/home/srcpackages|SRCPKGDEST=/build/out/srcpkg|' \
+	-e 's|#LOGDEST=/home/makepkglogs|LOGDEST=/build/out/log|' \
+	-e 's|#MAKEFLAGS="-j2"|MAKEFLAGS="-j8"|' \
+	-e 's|#PACKAGER="John Doe <john@doe.com>"|PACKAGER="Chris Cromer <chris@cromer.cl>"|' \
+	-i ${copy}/etc/makepkg.conf
+
+mkdir -p ${copy}/build
+cp * ${copy}/build/ 2>/dev/null
+
+# create the build script in the copy
+cat > ${copy}/build.sh <<EOF
+#!/bin/bash
+chown -R cromnix /build
+sudo -iu cromnix bash -c 'cd /build; makepkg $pacman_arguments "$@"' -bash "$@"
+sudo -iu cromnix bash -c 'cd /build; makepkg -fc --allsource "$@"' -bash "$@"
+find /build -maxdepth 1 -type l -delete
+EOF
+chmod 755 ${copy}/build.sh
+
+# update the chroot before building
+cromnix-chroot -x
+
+# build the package
+cromnix-chroot ${copy} "bash /build.sh"
+
+if [ ! -d "${PWD}"/out ]; then
+	mkdir -p "${PWD}"/out
+fi
+cp -R ${copy}/build/out/* "${PWD}"/out/
+chown -R ${out_usr} "${PWD}"/out
+
+# if the PKGBUILD changed, then let's send it back
+if ! cmp --silent "${copy}/build/PKGBUILD" "${PWD}/PKGBUILD"; then
+	cp ${copy}/build/PKGBUILD "${PWD}"/PKGBUILD
+	chown -R ${out_usr} "${PWD}"/PKGBUILD
+fi
