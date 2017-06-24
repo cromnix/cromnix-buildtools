@@ -1,7 +1,7 @@
 #!/bin/bash
-
 REPOS=('main' 'cromnix' 'vanilla' 'multilib' 'openrc' 'lfs' 's6' 'runit')
 PACCACHE=1
+KEY=''
 
 shopt -s extglob
 
@@ -26,6 +26,7 @@ usage() {
 	printf "                 which leaves 'n' packages in the repo. Default is 1.\n"
 	printf "  -s, --srccache Remove old sources from the repo. Has an optional argument\n"
 	printf "                 which leaves 'n' sources in the repo. Default is 1.\n"
+	printf "  -k, --key      (Optional) Key used to sign packages and repo.\n"
 
 	exit 0;
 }
@@ -106,14 +107,21 @@ addpackages() {
 addpackages_repo() {
 	for file in "${@:2}"; do
 		cp "${file}" "/var/lib/cromnix-repo/${1}/x86_64/${file}"
+		if [ -f "${file}.sig" ]; then
+			cp "${file}.sig" "/var/lib/cromnix-repo/${1}/x86_64/${file}.sig"
+		else
+			if [ ! "${KEY}" == '' ]; then
+				arg="-u ${KEY}"
+			fi
+			gpg ${arg} -b "${file}"
+		fi
 	done
 	pushd "/var/lib/cromnix-repo/${1}/x86_64"
-	repo-add -d "${1}.db.tar.gz" "${@:2}"
+	if [ ! "${KEY}" == '' ]; then
+		arg="-k ${KEY}"
+	fi
+	repo-add --sign ${arg} -d "${1}.db.tar.gz" "${@:2}"
 	popd
-	#cp "${file}" "/var/lib/cromnix-repo/${repo}/x86_64/${file}"
-	#pushd "/var/lib/cromnix-repo/${repo}/x86_64"
-	#repo-add -d "${repo}.db.tar.gz" "${file}"
-	#popd
 }
 
 rebuildrepo() {
@@ -146,7 +154,10 @@ rebuildrepo() {
 			packages+=("${file}")
 		done
 
-		repo-add -d "${REPO}.db.tar.gz" "${packages[@]}"
+		if [ ! "${KEY}" == '' ]; then
+			arg="-k ${KEY}"
+		fi
+		repo-add --sign ${arg} -d "${REPO}.db.tar.gz" "${packages[@]}"
 
 		# rotate in the old database files
 		if [ -e "${REPO}.db.tar.gz.bkp" ]; then
@@ -197,7 +208,6 @@ cleansource() {
 		if [ ${#files[@]} -eq 0 ]; then
 			echo "There are no sources to remove"
 		else
-			#echo "${files[@]}" | tr " " "\n"
 			rm -vf "${files[@]}"
 		fi
 	else
@@ -205,19 +215,11 @@ cleansource() {
 	fi
 }
 
-if [ "${EUID}" -ne 0 ]; then
-	if type -P sudo >/dev/null; then
-		exec sudo -- "${0}" "${@}"
-	else
-		if [ -z "${1}" ]; then
-			exec su root -c "$(printf ' %q' "${0}")"
-		else
-			exec su root -c "$(printf ' %q %q' "${0}" "${@}")"
-		fi
-	fi
+if [ "${EUID}" -eq 0 ]; then
+	die 'This script cannot be run as root!';
 fi
 
-TEMP=$(getopt -o 'hardp::s::' -l 'help,add,rebuild,delta,paccache::,srccache::' -n 'cromnix-repo' -- "$@")
+TEMP=$(getopt -o 'hark:dp::s::' -l 'help,add,rebuild,key:,paccache::,srccache::' -n 'cromnix-repo' -- "$@")
 if [ $? -ne 0 ]; then
 	usage
 fi
@@ -242,6 +244,15 @@ while true; do
 			rebuildrepo
 			exit 0
 			shift
+			continue
+		;;
+		'-k'|'--key')
+			case "${2}" in
+				*)
+					KEY=${2}
+				;;
+			esac
+			shift 2
 			continue
 		;;
 		'-p'|'--paccache')

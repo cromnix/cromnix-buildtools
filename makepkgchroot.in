@@ -37,6 +37,9 @@ if [ ! -f ./PKGBUILD ]; then
 	die "PKGBUILD not found"
 fi
 
+# update the chroot before copying
+cromnix-chroot -x
+
 # make a copy of the chroot
 mkdir -p ${copy}
 rsync -a --delete -q -W -x ${root}/ ${copy}
@@ -50,7 +53,7 @@ sed -e 's|#PKGDEST=/home/packages|PKGDEST=/build/out/pkg|' \
 	-e 's|#SRCDEST=/home/sources|SRCDEST=/build/out/src|' \
 	-e 's|#SRCPKGDEST=/home/srcpackages|SRCPKGDEST=/build/out/srcpkg|' \
 	-e 's|#LOGDEST=/home/makepkglogs|LOGDEST=/build/out/log|' \
-	-e 's|#MAKEFLAGS="-j2"|MAKEFLAGS="-j8"|' \
+	-e 's|#MAKEFLAGS="-j2"|MAKEFLAGS="-j$(nproc)"|' \
 	-e 's|#PACKAGER="John Doe <john@doe.com>"|PACKAGER="Chris Cromer <chris@cromer.cl>"|' \
 	-i ${copy}/etc/makepkg.conf
 
@@ -67,11 +70,11 @@ find /build -maxdepth 1 -type l -delete
 EOF
 chmod 755 ${copy}/build.sh
 
-# update the chroot before building
-cromnix-chroot -x
-
 # build the package
 cromnix-chroot ${copy} "bash /build.sh"
+
+# sync the pkg cache back to the root chroot
+rsync -a --delete -q -W -x ${copy}/var/cache/pacman/pkg/ ${root}/var/cache/pacman/pkg
 
 if [ ! -d "${PWD}"/out ]; then
 	mkdir -p "${PWD}"/out
@@ -81,6 +84,12 @@ chown -R ${out_usr} "${PWD}"/out
 
 # if the PKGBUILD changed, then let's send it back
 if ! cmp --silent "${copy}/build/PKGBUILD" "${PWD}/PKGBUILD"; then
-	cp ${copy}/build/PKGBUILD "${PWD}"/PKGBUILD
-	chown -R ${out_usr} "${PWD}"/PKGBUILD
+	if [ "${PWD}/PKGBUILD" -ot "${copy}/build/PKGBUILD" ]; then
+		cp ${copy}/build/PKGBUILD "${PWD}"/PKGBUILD
+		chown -R ${out_usr} "${PWD}"/PKGBUILD
+	fi
+	if [ "${PWD}/PKGBUILD" -nt "${copy}/build/PKGBUILD" ]; then
+		cp ${copy}/build/PKGBUILD "${PWD}"/PKGBUILD.chroot
+		chown -R ${out_usr} "${PWD}"/PKGBUILD.chroot
+	fi
 fi
