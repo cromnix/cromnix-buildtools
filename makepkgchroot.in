@@ -54,7 +54,7 @@ sed -e 's|#PKGDEST=/home/packages|PKGDEST=/build/out/pkg|' \
 	-e 's|#SRCPKGDEST=/home/srcpackages|SRCPKGDEST=/build/out/srcpkg|' \
 	-e 's|#LOGDEST=/home/makepkglogs|LOGDEST=/build/out/log|' \
 	-e 's|#MAKEFLAGS="-j2"|MAKEFLAGS="-j$(nproc)"|' \
-	-e 's|#PACKAGER="John Doe <john@doe.com>"|PACKAGER="Chris Cromer <chris@cromer.cl>"|' \
+	-e 's|#PACKAGER="John Doe <john@doe.com>"|PACKAGER="Chris Cromer <cromer@cromnix.org>"|' \
 	-i ${copy}/etc/makepkg.conf
 
 mkdir -p ${copy}/build
@@ -84,12 +84,12 @@ chown -R ${out_usr} "${PWD}"/out
 
 # if the PKGBUILD changed, then let's send it back
 if ! cmp --silent "${copy}/build/PKGBUILD" "${PWD}/PKGBUILD"; then
-	if [ "${PWD}/PKGBUILD" -ot "${copy}/build/PKGBUILD" ]; then
-		cp ${copy}/build/PKGBUILD "${PWD}"/PKGBUILD
-		chown -R ${out_usr} "${PWD}"/PKGBUILD
-	fi
 	if [ "${PWD}/PKGBUILD" -nt "${copy}/build/PKGBUILD" ]; then
 		cp ${copy}/build/PKGBUILD "${PWD}"/PKGBUILD.chroot
 		chown -R ${out_usr} "${PWD}"/PKGBUILD.chroot
+	fi
+	if [ "${PWD}/PKGBUILD" -ot "${copy}/build/PKGBUILD" ]; then
+		cp ${copy}/build/PKGBUILD "${PWD}"/PKGBUILD
+		chown -R ${out_usr} "${PWD}"/PKGBUILD
 	fi
 fi

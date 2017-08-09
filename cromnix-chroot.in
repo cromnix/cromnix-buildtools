@@ -1,10 +1,12 @@
 #!/bin/bash
 
-# Copyright (c) 2016-2017 Chris Cromer
+# Copyright (c) 2016-2017 Cromnix Devs
 #
 # This file is part of cromnix-buildtools. It is subject to the license terms in the LICENSE file found in the top-level directory of this distribution and at
 # https://mysite.com/LICENSE
 # This file may not be copied, modified, propagated, or distributed except according to the terms contained in the LICENSE file.
+
+
 
 die() {
 	echo ${@} 1>&2;
@@ -125,21 +127,16 @@ EOF
 
 	cp /etc/pacman.conf ${root}/root/etc/pacman.conf
 
+	if [[ -d /etc/pacman.d/gnupg && ! -d ${root}/root/etc/pacman.d/gnupg ]]; then
+		cp -a /etc/pacman.d/gnupg "${root}/root/etc/pacman.d/"
+	fi
+
 	# temp until a server is made
-	mkdir -p ${root}/root/var/lib/cromnix-repo
-	rsync -a --delete -q -W -x /var/lib/cromnix-repo/ ${root}/root/var/lib/cromnix-repo
+	#mkdir -p ${root}/root/var/lib/cromnix-repo
+	#rsync -a --delete -q -W -x /var/lib/cromnix-repo/ ${root}/root/var/lib/cromnix-repo
 }
 
 mountchroot() {
-	#mount_id=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1)
-
-	#if [ -d "/tmp/cromnix-chroot/${mount_id}" ]; then
-	#	die "${mount_id} already exists"
-	#fi
-
-	#mount_point="/tmp/cromnix-chroot/${mount_id}"
-	#mkdir -p "${mount_point}"
-
 	mount_point=$(mktemp -d /tmp/cromnix-chroot.XXXXXXXXXX)
 
 	if ! grep -qs "${mount_point}" /proc/mounts; then
@@ -254,7 +251,7 @@ elif [ ${chroot_action} -eq 3 ]; then
 		die "No chroot environment to upgrade"
 	fi
 	# copy the local repo into the chroot to help out with development, remove once a true server is online
-	rsync -a --delete -q -W -x /var/lib/cromnix-repo/ ${root}/root/var/lib/cromnix-repo
+	#rsync -a --delete -q -W -x /var/lib/cromnix-repo/ ${root}/root/var/lib/cromnix-repo
 
 	command="pacman --noconfirm -Syu $(IFS=$'\n'; echo "${packages[*]}")"
 	mountchroot ${root}/root
